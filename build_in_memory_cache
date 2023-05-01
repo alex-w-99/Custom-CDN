@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+
+from sys import argv, exit, stderr
+from CacheManager import CacheManager
+
+DEFAULT_PICKLE_FILE_NAME = "serialized_in_memory_cache.pickle"
+
+def main():
+    """
+    Purpose: Program entry point; this program utilizes the CacheManager.buildInMemoryCache() static method,
+             which creates a pickle file (i.e., a serialized Python dictionary containing 18.5 MB of compressed
+             article content). This pickle file contains the top 214 articles according to pageviews.csv (see
+             CacheManager.py for more information).
+    :return: Void.
+    """
+    arg_vector = argv
+    if len(arg_vector) > 2: 
+        print("Arguments should be of the form: \"./build_in_memory_cache serialized_in_memory_cache.pickle\"", file=stderr)
+        print("Exiting...", file=stderr)
+        exit(1)
+    
+    pickle_file = DEFAULT_PICKLE_FILE_NAME if len(arg_vector) == 1 else arg_vector[1]
+
+    CacheManager.buildInMemoryCache("cs5700cdnorigin.ccs.neu.edu", 
+            "8080",
+            "pageviews.csv",
+            pickle_file
+    )
+
+if __name__ == "__main__":
+    main()
+

@@ -1,0 +1,130 @@
+#!/bin/bash
+
+DNS_SERVER="cdn-dns.5700.network"
+HTTP1="cdn-http1.5700.network"
+HTTP2="cdn-http2.5700.network"
+HTTP3="cdn-http3.5700.network"
+HTTP4="cdn-http4.5700.network"
+HTTP5="cdn-http5.5700.network"
+HTTP6="cdn-http6.5700.network"
+HTTP7="cdn-http7.5700.network"
+HTTP_HOSTS=($HTTP1 $HTTP2 $HTTP3 $HTTP4 $HTTP5 $HTTP6 $HTTP7)
+DNS_DIR="dns_server"
+HTTP_DIR="http_server"
+PICKLE_FILE="serialized_in_memory_cache.pickle"
+PAGEVIEWS_CSV="pageviews.csv"
+IP_CSV="ip.csv"
+COORDINATES_CSV="coordinates.csv"
+
+# (1) PARSE INPUT ARGUMENTS:
+while getopts ":p:o:n:u:i:" args; do
+  case $args in
+    p) 
+      port="$OPTARG"
+      ;;
+    o) 
+      origin="$OPTARG"
+      ;;
+    n)
+      name="$OPTARG"
+      ;;
+    u) 
+      username="$OPTARG"
+      ;;
+    i) 
+      keyfile="$OPTARG"
+      ;;
+    ?) 
+      printf "Invalid option -$OPTARG" >$2  # >$2=stderr
+      printf "Should be of form: ./deployCDN -p <port> -o <origin> -n <name> -u <username> -i <keyfile>" >$2
+      exit 1
+      ;;
+  esac
+done
+
+# NOTE: To avoid entering the keyfile password many times, ssh-agent is used. Previous "deployCDN" commands 
+#	    that did NOT use ssh-agent are commented out below the current versions of the commands that do 
+#	    use ssh-agent in the following format: "#->[cmd]"
+eval "(ssh-agent -s)"
+ssh-add $keyfile
+
+# (2) SCP ALL RELEVANT FILES TO HTTP SERVER:
+echo "***PART II) DEPLOYING HTTP SERVERS..."
+HTTP_SERVER_PATH="/home/${username}/${HTTP_DIR}/"
+for host in "${HTTP_HOSTS[@]}"; do
+    # Remove existing HTTP directory and create a fresh one; also install relevant Python packages:
+  	ssh -A $username@$host "\
+        rm -rf $HTTP_SERVER_PATH; \
+        mkdir $HTTP_SERVER_PATH; \
+        pip install --user requests \
+    "
+    #->ssh -i $keyfile $username@$host "rm -rf $HTTP_SERVER_PATH; mkdir $HTTP_SERVER_PATH; pip install --user requests"
+
+    # Copy over the http server and related files:
+  	scp -o "ForwardAgent yes" -i $keyfile httpserver CacheManager.py utils.py pageviews.csv $username@$host:$HTTP_SERVER_PATH
+  	#->scp -i $keyfile httpserver CacheManager.py utils.py pageviews.csv $username@$host:$HTTP_SERVER_PATH
+    echo "*DEPLOYED HTTP SERVER AT $username@$host"
+
+done
+wait 
+
+# (3) ON DNS SERVER, CREATE IN-MEMORY CACHE (PICKLE FILE), SCP TO ALL HTTP SERVERS, AND RM FILE:
+echo "***PART III) DEPLOYING DNS SERVER..."
+DNS_SERVER_PATH="/home/${username}/${DNS_DIR}/"
+DNS_KEY_FILE_PATH="/home/${username}/${DNS_DIR}/kf"
+PICKLE_FILE_PATH="/home/${username}/${DNS_DIR}/${PICKLE_FILE}"
+DESTINATION_FILE_PATH="/home/${username}/${HTTP_DIR}"
+echo "*CLEANING DNS DIRECTORY AND INSTALLING RELEVANT PYTHON PACKAGES"
+ssh -A $username@$DNS_SERVER "\
+    rm -rf $DNS_SERVER_PATH; \
+    mkdir $DNS_SERVER_PATH; \
+    pip install --user geopy geoip2 \
+"
+#->ssh -i $keyfile $username@$DNS_SERVER "rm -rf $DNS_SERVER_PATH; mkdir $DNS_SERVER_PATH; pip install --user geopy geoip2"
+scp -o "ForwardAgent yes" -i $keyfile $keyfile $username@$DNS_SERVER:$DNS_KEY_FILE_PATH
+#->scp -i $keyfile $keyfile $username@$DNS_SERVER:$DNS_KEY_FILE_PATH
+scp -o "ForwardAgent yes" -i $keyfile build_in_memory_cache build_partial_disk_cache CacheManager.py utils.py pageviews.csv $username@$DNS_SERVER:$DNS_SERVER_PATH
+#->scp -i $keyfile build_in_memory_cache build_partial_disk_cache CacheManager.py utils.py pageviews.csv $username@$DNS_SERVER:$DNS_SERVER_PATH
+
+echo "*BUILDING IN-MEMORY CACHE"
+ssh -A $username@$DNS_SERVER "\
+    /home/${username}/$DNS_DIR/build_in_memory_cache $PICKLE_FILE \
+"
+#->ssh -i $keyfile $username@$DNS_SERVER "/home/${username}/$DNS_DIR/build_in_memory_cache $PICKLE_FILE"
+
+echo "*SCP IN-MEMORY CACHE FILE TO HTTP SERVERS"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP1}:${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP2}:${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP3}:${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP4}:${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP5}:${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP6}:${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "scp -i '${DNS_KEY_FILE_PATH}' '${PICKLE_FILE_PATH}' '${username}@${HTTP7}:${DESTINATION_FILE_PATH}'"
+
+# (4) SCP ALL RELEVANT FILES TO DNS SERVER:
+echo "***PART IV) CLEANING DNS DIRECTORY AND SCP RELEVANT FILES..."
+ssh -A $username@$DNS_SERVER "\
+    rm /home/${username}/$DNS_DIR/build_in_memory_cache; \
+    rm /home/${username}/$DNS_DIR/$PICKLE_FILE \
+"
+#->ssh -i $keyfile $username@$DNS_SERVER "rm /home/${username}/$DNS_DIR/build_in_memory_cache; rm /home/${username}/$DNS_DIR/$PICKLE_FILE"
+scp -o "ForwardAgent yes" -i $keyfile dnsserver GeoInfo.py ip.csv coordinates.csv $username@$DNS_SERVER:$DNS_SERVER_PATH
+#->scp -i $keyfile dnsserver GeoInfo.py ip.csv coordinates.csv $username@$DNS_SERVER:$DNS_SERVER_PATH
+
+# (5) BUILD PARTIAL /CACHE/ ON DNS SERVER AND CLEAN UP:
+echo "***PART V) BUILDING PARTIAL DISK CACHE ON DNS SERVER..."
+ssh -A $username@$DNS_SERVER "\
+    /home/${username}/$DNS_DIR/build_partial_disk_cache; \
+    rm /home/${username}/${DNS_DIR}/CacheManager.py; \
+    rm /home/${username}/${DNS_DIR}/utils.py; \
+    rm /home/${username}/${DNS_DIR}/build_partial_disk_cache \
+"
+#->ssh -i $keyfile $username@$DNS_SERVER "/home/${username}/$DNS_DIR/build_partial_disk_cache; rm /home/${username}/${DNS_DIR}/CacheManager.py; rm /home/${username}/${DNS_DIR}/utils.py; rm /home/${username}/${DNS_DIR}/build_partial_disk_cache"
+
+echo "***SUCCESSFULLY DEPLOYED DNS SERVER"
+
+echo "Killing the SSH agent..."
+ssh-agent -k
+
+echo "***CDN SUCCESSFULLY DEPLOYED"
+

@@ -1,0 +1,78 @@
+#!/bin/bash 
+
+HTTP1="cdn-http1.5700.network"
+HTTP2="cdn-http2.5700.network"
+HTTP3="cdn-http3.5700.network"
+HTTP4="cdn-http4.5700.network"
+HTTP5="cdn-http5.5700.network"
+HTTP6="cdn-http6.5700.network"
+HTTP7="cdn-http7.5700.network"
+HTTP_SERVERS=($HTTP1 $HTTP2 $HTTP3 $HTTP4 $HTTP5 $HTTP6 $HTTP7)
+DNS_SERVER="cdn-dns.5700.network"
+HTTP_DIR="http_server"
+DNS_DIR="dns_server"
+
+# (1) PARSE INPUT ARGUMENTS:
+while getopts ":p:o:n:u:i:" args; do
+  case $args in
+    p) 
+      port="$OPTARG"
+      ;;
+    o) 
+      origin="$OPTARG"
+      ;;
+    n)
+      name="$OPTARG"
+      ;;
+    u) 
+      username="$OPTARG"
+      ;;
+    i)
+      keyfile="$OPTARG"
+      ;;
+    ?) 
+      echo "Invalid option -$OPTARG" >$2  # >$2=stderr
+      echo "Should be of form: ./deployCDN -p <port> -o -<origin> -n <name> -u <username> -i <keyfile>" >$2
+      exit 1
+      ;;
+  esac
+done
+
+DNS_KEY_FILE_PATH="/home/${username}/${DNS_DIR}/kf"
+SOURCE_FILE_PATH="/home/${username}/${DNS_DIR}/cache"
+DESTINATION_FILE_PATH="/home/${username}/${HTTP_DIR}/cache"
+
+# (2) START RUNNING HTTP SERVER (on each http server node):
+for SERVER in "${HTTP_SERVERS[@]}"; do 
+	ssh -i $keyfile $username@$SERVER "\
+        nohup /home/${username}/$HTTP_DIR/httpserver -p $port -o $origin > /dev/null 2>&1 & \
+    "
+	echo "HTTP server at ${username}@$SERVER is running" 
+done 
+
+# (3) SCP DNS /CACHE/ FOLDER TO HTTP SERVERS:
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP1}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP2}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP3}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP4}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP5}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP6}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+ssh -t -q "${username}@${DNS_SERVER}" "tar czf - ${SOURCE_FILE_PATH} | ssh -i '${DNS_KEY_FILE_PATH}' '${username}@${HTTP7}' 'mkdir -p ${DESTINATION_FILE_PATH} && tar xzf - -C ${DESTINATION_FILE_PATH}'"
+
+ssh -i $keyfile $username@$DNS_SERVER "\
+    rm -rf /home/${username}/${DNS_DIR}/cache \
+"
+echo "Removed /cache/ from DNS server"
+
+# (4) START RUNNING DNS SERVER:
+# This command redirects both the standard output (stdout) and standard error (stderr) to /dev/null, which discards the output. 
+# The 2>&1 syntax means "redirect stderr (file descriptor 2) to the same destination as stdout (file descriptor 1).
+ssh -i $keyfile $username@$DNS_SERVER "\
+  nohup /home/${username}/$DNS_DIR/dnsserver -p $port -n $name > /dev/null 2>&1 & \
+"
+echo "DNS server at $DNS_SERVER is running"
+
+wait
+
+echo "CDN is running!"
+

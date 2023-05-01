@@ -1,0 +1,59 @@
+#!/bin/bash
+
+DNS_SERVER="cdn-dns.5700.network"
+HTTP_HOSTS=(
+    "cdn-http1.5700.network"
+    "cdn-http2.5700.network"
+    "cdn-http3.5700.network"
+    "cdn-http4.5700.network"
+    "cdn-http5.5700.network"
+    "cdn-http6.5700.network"
+    "cdn-http7.5700.network"
+)
+DNS_DIR="dns_server"
+HTTP_DIR="http_server"
+
+# (1) PARSE INPUT ARGUMEMTS:
+while getopts ":p:o:n:u:i:" args; do
+  case $args in
+    p)
+      port="$OPTARG"
+      ;;
+    o)
+      origin="$OPTARG"
+      ;;
+    n)
+      name="$OPTARG"
+      ;;
+    u)
+      username="$OPTARG"
+      ;;
+    i)
+      keyfile="$OPTARG"
+      ;;
+    ?)
+      echo "Invalid option -$OPTARG" >$2  # >$2=strerr
+      echo "Should be of form: ./stopCDN -p <port> -o <origin> -n <name> -u <username> -i <keyfile>" >$2
+      exit 1
+      ;;
+  esac
+done
+
+# (2) SHUT DOWN DNS SERVER AND CLEAN:
+ssh -i $keyfile $username@$DNS_SERVER "\
+    killall -u $username python3; \
+    rm -rf ~/$DNS_DIR/* \
+"
+
+# (3) SHUT DOWN HTTP SERVERS AND CLEAN:
+for host in "${HTTP_HOSTS[@]}"; do
+	ssh -i $keyfile $username@$host "\
+        killall -u $username python3; \
+        rm -rf ~/$HTTP_DIR/* \
+    "
+done
+
+wait
+
+echo "CDN successfully stopped and cleaned up."
+

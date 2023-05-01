@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+
+from dnslib import *
+import argparse 
+import socket 
+from GeoInfo import GeoInfo
+from geopy.distance import great_circle
+import geoip2.webservice
+from concurrent.futures import ThreadPoolExecutor
+
+parser = argparse.ArgumentParser(description='Run a DNS server')
+parser.add_argument('-p', '--port', type=int, required=True,help='port number to listen on')
+parser.add_argument('-n', '--name', required=True, help='name of the DNS server')
+args = parser.parse_args()
+MM_ACCOUNT_ID = 851610
+MM_ACCOUNT_ID2 = 852263
+MM_API_KEY = "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"
+MM_API_KEY2 = "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"
+MM_HOST = "geolite.info"
+ACCOUNT_1 = (MM_ACCOUNT_ID2, MM_API_KEY2)
+ACCOUNT_2 = (MM_ACCOUNT_ID, MM_API_KEY)
+DEFAULT_ACCOUNT = ACCOUNT_1 # Prepare two set of credentials for the API service
+ 
+PORT = args.port 
+EXPECTED_DOMAIN = args.name  #cs5700cdn.example.com
+HOST_NAME = "cdn-dns.5700.network"
+REPLICA_SERVERS = {
+            "server1": "cdn-http1.5700.network",
+            "server2": "cdn-http2.5700.network",
+            "server3": "cdn-http3.5700.network",
+            "server4": "cdn-http4.5700.network",
+            "server5": "cdn-http5.5700.network",
+            "server6": "cdn-http6.5700.network",
+            "server7": "cdn-http7.5700.network"
+}
+
+class DNSServer:
+
+    def __init__(self, host=HOST_NAME, port=PORT):
+        self.host = host 
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  
+        self.geo_info = None
+        self.geoip_client = geoip2.webservice.Client(DEFAULT_ACCOUNT[0], DEFAULT_ACCOUNT[1], MM_HOST)  # Maxmind API Service 
+        self.mapping_cache = dict()
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.replica_locations = self.cache_servers_locations() 
+ 
+    def get_coordinates(self, ip_address):
+        """
+        Use MaxMind API service to access the free GeoLite2 database
+        Get client/servers' geographic coordinates
+
+        Note:
+        If API service becomes inaccessible at any point due to any reason, use GeoInfo class as the alternative approach 
+        Alternative approach may take more RAM usage and have the possibility of higher latency, but at least it keeps the program running
+        """
+        try:
+            location = self.geoip_client.city(ip_address)
+            lat = location.location.latitude
+            lon = location.location.longitude
+            return (lat, lon)
+        except geoip2.errors.AddressNotFoundError:
+            return None
+        except Exception as e: 
+            if str(e) == "You have used all 1000 of your GeoLite2 queries for the day" and DEFAULT_ACCOUNT == ACCOUNT_1:
+                DEFAULT_ACCOUNT = ACCOUNT_2
+                self.geoip_client = geoip2.webservice.Client(DEFAULT_ACCOUNT[0], DEFAULT_ACCOUNT[1], MM_HOST)  # Switch to another set of credentials
+                return self.get_coordinates(ip_address)
+            else: 
+                if self.geo_info:
+                    coordinates = self.geo_info.get_coordinates_geo_center(ip_address)
+                else:
+                    self.geo_info = GeoInfo("ip.csv", "coordinates.csv")
+                    coordinates = self.geo_info.get_coordinates_geo_center(ip_address)
+            return coordinates
+
+    def cache_servers_locations(self):
+        """
+        Caches servers' coordinates to save API usage 
+        """
+        locations_dict = dict()
+        for server_name, server_hostname in REPLICA_SERVERS.items():
+            locations_dict[server_name] = self.get_coordinates(socket.gethostbyname(server_hostname))
+        return locations_dict
+
+    def get_closest_server_ip_address(self, client_ip):
+        """
+        Returns the ip address of the closest server based on clients' ip addresses 
+        If client's location is not found, return a random server which could possibly have the lightest loads 
+        """
+        client_location = self.get_coordinates(client_ip)
+        if client_location:
+            closest_server, shortest_distance = min(
+                ((server_name, great_circle(self.replica_locations[server_name], client_location).km)
+                 for server_name, server_hostname in REPLICA_SERVERS.items()),
+                key=lambda x: x[1])
+
+            ip = socket.gethostbyname(REPLICA_SERVERS[closest_server])
+            self.mapping_cache[client_ip] = ip
+            return ip
+        else:
+            return socket.gethostbyname(REPLICA_SERVERS["server6"])
+         
+    def handle_request(self, data, addr):
+        """
+        DNS Handler 
+        If query is of type A and requested domain is correct, return the ip address
+        If query is of type A and requested domain is not correct, return the root node and NS record
+        If query is not of type A, reply with a response with a REFUSED status code 
+        """
+        client_ip_address = addr[0]
+        print(client_ip_address)
+        request = DNSRecord.parse(data)
+        if request.q.qtype == QTYPE.A:
+            qname = str(request.q.qname)[:-1]
+            if '/' in qname: # In case there is no slash in qname, which results in ValueError
+                domain_name, path = qname.split('/', 1)
+            else:
+                domain_name = qname
+                path = ''  # or another default value
+            if domain_name == EXPECTED_DOMAIN:
+                if client_ip_address in self.mapping_cache: # check the cache 
+                    ip_address_to_return = self.mapping_cache[client_ip_address]
+                else: # if not in the cache 
+                    ip_address_to_return = self.get_closest_server_ip_address(client_ip_address)
+                response = DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
+                response.add_answer(RR(request.q.qname, QTYPE.A, rdata=A(ip_address_to_return)))
+                self.sock.sendto(response.pack(), addr)
+
+            else:
+                root_server = "a.root-servers.net"
+                root_server_ip = socket.gethostbyname(root_server)
+                response = DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
+                response.add_answer(RR(request.q.qname, QTYPE.A, rdata=A(root_server_ip)))
+                response.add_auth(RR(request.q.qname, QTYPE.NS, rdata=NS(root_server)))
+                self.sock.sendto(response.pack(), addr)
+
+        else: 
+            response = DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, rcode=RCODE.REFUSED), q=request.q)
+            self.sock.sendto(response.pack(), addr)
+            
+    def start(self):
+        """
+        Purpose: Starts the DNS server and runs it indefinitely.
+        """
+        self.sock.bind((self.host, self.port))
+        print("DNS server listening on {}:{}".format(self.host, self.port))
+        while True:
+            data, addr = self.sock.recvfrom(1024)
+            print("***New Query***")
+            self.executor.submit(self.handle_request, data, addr)
+
+    def stop(self):
+        """
+        Purpose: Stops the DNS server.
+        """
+        self.sock.close()
+        self.geoip_client.close()
+
+def main():
+    """
+    Purpose: Program entry point; starts running the DNS server.
+    :return: Void.
+    """
+    try:
+        dns_server = DNSServer()
+        dns_server.start()
+    except KeyboardInterrupt:
+        dns_server.executor.shutdown(wait=False)
+        dns_server.stop()
+        print("------ DNS Server Closed ------")
+    
+
+
+if __name__ == "__main__":
+    main()
+    

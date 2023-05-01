@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+
+import os
+from urllib.parse import unquote
+from zlib import decompress
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from CacheManager import CacheManager
+from shutil import rmtree
+import utils
+
+GRADING_BEACON_PATH = "/grading/beacon"
+CACHE_DIR = "cache/"
+ORIGIN_ADDRESS = None
+CACHE_MANAGER = None
+
+class httpRequestHandler(BaseHTTPRequestHandler):
+   """
+   Used to handle all GET and POST requests to that server receives;
+   Inherits from BaseHTTPRequestHander.
+   """
+   
+   def do_GET(self) -> None:
+       """
+       Purpose: Defines how the HTTP server processes GET requests; the global
+                ORIGIN_ADDRESS variable is accessed, and the URL path requested is
+                formated to handle special characters. Then:
+                - If the path is "/grading/beacon", HTTP response code 204 is returned;
+                - Elif the path has multiple "/", HTTP response code 400 is returned;
+                - Elif the path is in CACHE_MANAGER's in-memory cache, fetch that value,
+                    decompress it, and return it along with HTTP response code 200;
+                - Elif the path is cached on disk (in /cache/), fetch that file,
+                    decompress its contents, and return it along with response code 200;
+                - Else, attempt to fetch the content from ORIGIN_SERVER; if a bad
+                    response code is returned, return response code 404; Otherwise,
+                    return the content.
+       :return: Void.
+       """
+       global ORIGIN_ADDRESS
+       self.path = unquote( self.path.encode("latin1").decode("utf-8") )
+       if self.path == GRADING_BEACON_PATH:
+           self.send_response(204)
+           self.end_headers()
+       elif len(self.path.split("/")) > 2:  # anything more than 1 slash is a bad request
+           self.send_error(400, "400: Bad request")
+       elif (path:=utils.formatPath(self.path)) in CACHE_MANAGER.in_memory_cache:
+           # print("CACHED IN MEMORY")
+           decompressed_content = decompress(CACHE_MANAGER.in_memory_cache[path])
+           self.send_response(200)
+           self.send_header("Content-type", "text/html")
+           self.send_header("Content-length", str(len(decompressed_content)))
+           self.end_headers()
+           self.wfile.write(decompressed_content)
+       elif os.path.exists(CACHE_DIR + path):
+           # print("CACHED ON DISK")
+           with open(CACHE_DIR + path, "rb") as f:
+               compressed_content = f.read()
+           decompressed_content = decompress(compressed_content)
+           self.send_response(200)
+           self.send_header("Content-type", "text/html")
+           self.send_header("Content-length", str(len(decompressed_content)))
+           self.end_headers()
+           self.wfile.write(decompressed_content)
+       else:
+           # print("NOT CACHED")
+           url = ORIGIN_ADDRESS + path
+           response = CACHE_MANAGER.getUrlResponse(url)
+           if response.status_code in range(200, 300):
+               origin_response = response.content
+               self.send_response(200)
+               self.send_header("Content-type", "text/html")
+               self.send_header("Content-length", str(len(origin_response)))
+               self.end_headers()
+               self.wfile.write(origin_response)
+           else:
+               self.send_error(404, "404: Not found")
+
+class threadedHttpServer(ThreadingMixIn, HTTPServer):
+    """
+    The threadedHttpServer class creates a threaded HTTP server. It does this by
+        inheriting from ThreadingMixIn, which is what provides threading functionality,
+        as well as using HTTPServer to provide basic HTTP server functionality. An
+        instance of the threadedHttpServer class is returned upon instantiation.
+    """
+    pass
+
+def setOriginAddress(origin_server: str, origin_port: str) -> None:
+    """
+    Purpose: Sets the ORIGIN_ADDRESS global variable by concatenating the origin server
+             address and port that are passed in into a single URL. 
+    :param origin_server: str representing the desired address of the origin server.
+    :param origin_port: str representing the desired port number of the origin server.
+    :return: Void.
+    """
+    global ORIGIN_ADDRESS
+    ORIGIN_ADDRESS = "http://" + origin_server + ":" + origin_port + "/"
+
+def main():
+    """
+    Purpose: Program entry point; sets up an HTTP server to server forever while
+             efficiently managing both in-memory and on-disk cache.
+    :return: Void.
+    """
+    # 1. Wipe clean the /cache/ folder if it exists, and create a fresh /cache/:
+    if os.path.exists(os.path.join( os.getcwd(), CACHE_DIR )):
+        rmtree(os.path.join( os.getcwd(), CACHE_DIR ))
+    os.mkdir(os.path.join( os.getcwd(), CACHE_DIR ))
+    
+    # 2. Parse command line arguments:
+    origin_server, origin_port, replica_server_port = utils.parseArgsHttpServer()
+
+    # 3. Setting ORIGIN_ADDRESS (global variable) using command line arguments:
+    setOriginAddress(origin_server, origin_port)  # setting ORIGIN_ADDRESS global variable
+
+    # 4. Defining the address and port on which the HTTP server will server:
+    replica_server_address = (utils.getLocalIpAddress(), replica_server_port)
+   
+    # 5. Initializing and preparing the CacheManager (global variable):
+    global CACHE_MANAGER
+    CACHE_MANAGER = CacheManager(origin_server, origin_port, "/cache")
+    CACHE_MANAGER.loadInMemoryCache()  # read pickle file into memory and delete it
+    CACHE_MANAGER.completeDiskCacheThread()
+
+    # 6. Preparing the multi-threaded HTTP server:
+    http_server = threadedHttpServer(replica_server_address, httpRequestHandler)
+
+    # 7. Having the multi-threaded HTTP server server indefinitely:
+    try:
+        print(f"Server running at {utils.getLocalIpAddress()}:{replica_server_port}")
+        print(f"ORIGIN_ADDRESS=\"{ORIGIN_ADDRESS}\"")
+        http_server.serve_forever()  # will run on indefinitely
+    except KeyboardInterrupt:
+        http_server.server_close()
+        print("Server closed.")
+
+
+if __name__ == "__main__":
+    main()
+
