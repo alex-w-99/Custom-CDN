@@ -84,4 +84,4 @@ Before delving into the details of this project, it is important to first unders
 ## Contact Information
 
 - Alexander Wilcox
-- Email: alexander.w.wilcox@gmail.com
+- Email: alexander.w.wilcox [at] gmail.com
